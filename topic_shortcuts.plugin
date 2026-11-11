@@ -1,0 +1,365 @@
+__id__ = "topic_shortcuts"
+__name__ = "Topic Shortcuts"
+__description__ = "One launcher shortcut per forum topic, each opening that exact topic, with the topic's own name and icon. Long press the app icon, search for it in your launcher, or pin any topic to the home screen. Made by [firestarter1996](https://github.com/firestarter1996)."
+__author__ = "firestarter1996"
+__version__ = "1.0.0"
+__min_version__ = "12.5.1"
+
+# XF (like Telegram and Nagram X) publishes one conversation shortcut per CHAT ("ndid_<dialog>"),
+# so a forum group with many topics gets a single launcher chip named after its newest topic.
+# This plugin publishes one long lived shortcut per topic of the forum groups you own or run,
+# opening LaunchActivity with chatId + topicId (the same extras a topic notification tap uses),
+# plus your bot chats that have no chip yet. Work runs on the plugin queue, never the UI thread:
+# once a few seconds after load, when XF goes to the background, and after XF rebuilds its own
+# shortcuts. Nothing is published when nothing changed. No polling, no per message work.
+
+from java import jclass, jlong, jint
+from base_plugin import BasePlugin, MethodHook
+from hook_utils import find_class, get_private_field
+from client_utils import run_on_queue, get_selected_account
+from ui.settings import Header, Switch, Input, Text, Divider
+
+PREFIX = "xft_"
+ICON = 216
+
+
+def _log(msg):
+    try:
+        jclass("android.util.Log").i("TopicShortcuts", str(msg))
+    except Exception:
+        pass
+
+
+class TopicShortcutsPlugin(BasePlugin):
+
+    def create_settings(self):
+        items = [
+            Header(text="Topic Shortcuts"),
+            Switch(key="enabled", text="Topic shortcuts", default=True,
+                   subtext="One launcher shortcut per topic, opening that topic.", on_change=self._changed),
+            Switch(key="bots", text="Bot chats too", default=True,
+                   subtext="Adds your recent bot chats that have no shortcut yet.", on_change=self._changed),
+            Input(key="last", text="Put these topics last", default="General, Updates, Usage",
+                  subtext="Names separated by commas. Pinned topics come first.", on_change=self._changed),
+            Divider(text="The launcher shows a limited number at once. Pin any topic below to keep it on the home screen."),
+            Header(text="Pin to home screen"),
+        ]
+        try:
+            for e in (self.last_entries or [])[:40]:
+                items.append(Text(text=e["label"], subtext=e["long"], icon="msg_addbot" if e["bot"] else "msg_topics",
+                                  on_click=(lambda v, e=e: self._pin(e))))
+        except Exception as ex:
+            self._err("settings", ex)
+        return items
+
+    def on_plugin_load(self):
+        self.errors = 0
+        self.last_sig = None
+        self.last_entries = []
+        self.last_run = 0
+        self.pending = False
+        plugin = self
+
+        class PauseHook(MethodHook):
+            def after_hooked_method(self, param):
+                plugin._schedule(1500, False)
+
+        class RebuildHook(MethodHook):
+            def after_hooked_method(self, param):
+                plugin._schedule(2500, True)
+
+        la = find_class("org.telegram.ui.LaunchActivity")
+        if la is not None:
+            self.hook_method(la.getDeclaredMethod("onPause"), PauseHook())
+        mdc = find_class("org.telegram.messenger.MediaDataController")
+        if mdc is not None:
+            for m in mdc.getDeclaredMethods():
+                if m.getName().startswith("lambda$buildShortcuts$"):
+                    self.hook_method(m, RebuildHook())
+        self._schedule(6000, True)
+        _log("loaded %s" % __version__)
+
+    def on_plugin_unload(self):
+        try:
+            self._remove_mine(set())
+        except Exception as e:
+            self._err("unload", e)
+
+    def _err(self, where, e):
+        if self.errors < 8:
+            self.errors += 1
+            _log("%s: %s" % (where, e))
+
+    def _changed(self, *a):
+        self._schedule(300, True)
+
+    def _schedule(self, delay, force):
+        if force:
+            self.last_sig = None
+        if self.pending:
+            return
+        self.pending = True
+        run_on_queue(self._run, delay=delay)
+
+    def _run(self):
+        self.pending = False
+        try:
+            self._publish()
+        except Exception as e:
+            self._err("publish", e)
+
+    # ---------- data ----------
+
+    def _ctx(self):
+        return jclass("org.telegram.messenger.ApplicationLoader").applicationContext
+
+    @staticmethod
+    def _bare(title):
+        """Topic name without emoji or spaces, lower case: "🐧 Deb" and "deb" match."""
+        return "".join(ch for ch in str(title).lower() if ch.isalnum())
+
+    def _entries(self, acc):
+        MC = jclass("org.telegram.messenger.MessagesController")
+        mc = MC.getInstance(acc)
+        tc = mc.getTopicsController()
+        dialogs = mc.getAllDialogs()
+        last = [self._bare(s) for s in str(self.get_setting("last", "General, Updates, Usage")).split(",") if s.strip()]
+        topics, bots = [], []
+        n = min(dialogs.size(), 60)
+        for i in range(n):
+            d = dialogs.get(i)
+            did = d.id
+            if did < 0:
+                chat = mc.getChat(-did)
+                if chat is None or not chat.forum or getattr(chat, "monoforum", False):
+                    continue
+                if not (chat.creator or chat.admin_rights is not None):
+                    continue
+                lst = tc.getTopics(-did)
+                if lst is None or lst.size() == 0:
+                    tc.loadTopics(-did)
+                    continue
+                rows = []
+                for j in range(lst.size()):
+                    t = lst.get(j)
+                    if t is None or getattr(t, "hidden", False):
+                        continue
+                    title = str(t.title or "").strip()
+                    if not title:
+                        continue
+                    if self._bare(title) in last:
+                        grp = 2 + last.index(self._bare(title))
+                    elif t.pinned:
+                        grp = 0
+                    else:
+                        grp = 1
+                    rows.append((grp, j if t.pinned else int(t.id), t, title))
+                rows.sort(key=lambda r: (r[0], r[1]))
+                for grp, _, t, title in rows:
+                    topics.append({"id": "%s%d_%d" % (PREFIX, -did, int(t.id)), "chat": -did, "topic": int(t.id),
+                                   "user": 0, "label": title, "long": "%s in %s" % (title, chat.title),
+                                   "emoji": int(t.icon_emoji_id or 0), "color": int(t.icon_color), "bot": False, "t": t})
+            elif did > 0 and self.get_setting("bots", True):
+                u = mc.getUser(did)
+                if u is None or not u.bot:
+                    continue
+                name = str(u.first_name or u.username or "Bot").strip()
+                ph = u.photo.photo_id if u.photo is not None else 0
+                bots.append({"id": "%su%d" % (PREFIX, did), "chat": 0, "topic": 0, "user": did, "label": name,
+                             "long": name, "emoji": ph, "color": 0, "bot": True, "u": u})
+        return topics, bots
+
+    # ---------- publish ----------
+
+    def _publish(self):
+        ctx = self._ctx()
+        if not self.get_setting("enabled", True):
+            self._remove_mine(set())
+            self.last_sig = None
+            return
+        acc = get_selected_account()
+        topics, bots = self._entries(acc)
+        SM = ctx.getSystemService(jclass("android.content.pm.ShortcutManager"))
+        SMC = jclass("androidx.core.content.pm.ShortcutManagerCompat")
+        cur = SMC.getDynamicShortcuts(ctx)
+        cur_ids = set()
+        others = set()
+        for i in range(cur.size()):
+            sid = str(cur.get(i).getId())
+            (cur_ids if sid.startswith(PREFIX) else others).add(sid)
+        # skip bots XF already shows (its own notification shortcut for that chat)
+        bots = [b for b in bots if ("ndid_%d" % b["user"]) not in others][:4]
+        room = max(1, SM.getMaxShortcutCountPerActivity() - len(others))
+        want = (topics + bots)[:room]
+        self.last_entries = topics + bots
+        sig = "|".join("%s:%s:%s:%s" % (e["id"], e["label"], e["emoji"], e["color"]) for e in want)
+        ids = set(e["id"] for e in want)
+        if sig == self.last_sig and ids.issubset(cur_ids):
+            return
+        self._remove_mine(ids)
+        lst = jclass("java.util.ArrayList")()
+        for rank, e in enumerate(want):
+            info = self._build(ctx, acc, e, rank)
+            if info is not None:
+                lst.add(info)
+        if lst.size() > 0:
+            if not SMC.addDynamicShortcuts(ctx, lst):
+                _log("rate limited, will retry on next pause")
+                return
+            SMC.updateShortcuts(ctx, lst)
+        self.last_sig = sig
+        _log("published %d of %d (room %d)" % (lst.size(), len(topics) + len(bots), room))
+
+    def _remove_mine(self, keep):
+        ctx = self._ctx()
+        SMC = jclass("androidx.core.content.pm.ShortcutManagerCompat")
+        cur = SMC.getDynamicShortcuts(ctx)
+        drop = jclass("java.util.ArrayList")()
+        for i in range(cur.size()):
+            sid = str(cur.get(i).getId())
+            if sid.startswith(PREFIX) and sid not in keep:
+                drop.add(sid)
+        if drop.size() > 0:
+            SMC.removeDynamicShortcuts(ctx, drop)
+
+    def _intent(self, ctx, acc, e):
+        Intent = jclass("android.content.Intent")
+        it = Intent(ctx, jclass("org.telegram.ui.LaunchActivity"))
+        it.setAction("com.tmessages.openchat" + e["id"])
+        it.setFlags(0x4000000)
+        if e["user"]:
+            it.putExtra("userId", jlong(e["user"]))
+        else:
+            it.putExtra("chatId", jlong(e["chat"]))
+            it.putExtra("topicId", jlong(e["topic"]))
+        it.putExtra("currentAccount", jint(int(acc)))
+        return it
+
+    def _build(self, ctx, acc, e, rank):
+        try:
+            B = jclass("androidx.core.content.pm.ShortcutInfoCompat$Builder")
+            b = B(ctx, e["id"])
+            b.setShortLabel(e["label"])
+            b.setLongLabel(e["long"])
+            b.setIntent(self._intent(ctx, acc, e))
+            b.setLongLived(True)
+            b.setRank(rank)
+            b.setLocusId(jclass("androidx.core.content.LocusIdCompat")(e["id"]))
+            icon = self._icon(acc, e)
+            P = jclass("androidx.core.app.Person$Builder")()
+            P.setName(e["label"]).setKey(e["id"])
+            if e["bot"]:
+                P.setBot(True)
+            if icon is not None:
+                b.setIcon(icon)
+                P.setIcon(icon)
+            b.setPerson(P.build())
+            return b.build()
+        except Exception as ex:
+            self._err("build " + e["label"], ex)
+            return None
+
+    # ---------- icons ----------
+
+    def _canvas_icon(self, draw):
+        Bitmap = jclass("android.graphics.Bitmap")
+        Config = jclass("android.graphics.Bitmap$Config")
+        bmp = Bitmap.createBitmap(ICON, ICON, Config.ARGB_8888)
+        c = jclass("android.graphics.Canvas")(bmp)
+        draw(c, bmp)
+        return jclass("androidx.core.graphics.drawable.IconCompat").createWithAdaptiveBitmap(bmp)
+
+    def _icon(self, acc, e):
+        try:
+            if e["bot"]:
+                return self._avatar_icon(acc, e["u"])
+            src = self._emoji_bitmap(acc, e["emoji"]) if e["emoji"] else None
+            Color = jclass("android.graphics.Color")
+            inner = int(ICON * 0.5)
+            off = (ICON - inner) // 2
+
+            def draw(c, bmp):
+                c.drawARGB(255, 0x17, 0x21, 0x2B)
+                if src is not None:
+                    Rect = jclass("android.graphics.Rect")
+                    p = jclass("android.graphics.Paint")(jclass("android.graphics.Paint").FILTER_BITMAP_FLAG)
+                    c.drawBitmap(src, None, Rect(off, off, off + inner, off + inner), p)
+                else:
+                    dr = jclass("org.telegram.ui.Components.Forum.ForumUtilities").createTopicDrawable(e["t"], False)
+                    dr.setBounds(off, off, off + inner, off + inner)
+                    dr.draw(c)
+            return self._canvas_icon(draw)
+        except Exception as ex:
+            self._err("icon " + e["label"], ex)
+            return None
+
+    def _emoji_bitmap(self, acc, doc_id):
+        """The topic's custom emoji as a still bitmap, from files XF already downloaded. None if not on disk."""
+        doc = jclass("org.telegram.ui.Components.AnimatedEmojiDrawable").findDocument(acc, doc_id)
+        if doc is None:
+            return None
+        FL = jclass("org.telegram.messenger.FileLoader").getInstance(acc)
+        BF = jclass("android.graphics.BitmapFactory")
+        f = FL.getPathToAttach(doc, True)
+        mime = str(doc.mime_type or "")
+        if f is not None and f.exists():
+            if "tgsticker" in mime:
+                RL = jclass("org.telegram.ui.Components.RLottieDrawable")
+                d = RL(f, None, 160, 160, None, False, None, 0, False)
+                try:
+                    np = get_private_field(d, "nativePtr")
+                    if np is not None:
+                        Bitmap = jclass("android.graphics.Bitmap")
+                        bmp = Bitmap.createBitmap(160, 160, jclass("android.graphics.Bitmap$Config").ARGB_8888)
+                        np.getFrame(0, bmp, True)
+                        return bmp
+                finally:
+                    d.recycle(False)
+            elif "webp" in mime or "png" in mime:
+                bmp = BF.decodeFile(f.getAbsolutePath())
+                if bmp is not None:
+                    return bmp
+        thumbs = doc.thumbs
+        if thumbs is not None:
+            for i in range(thumbs.size()):
+                tf = FL.getPathToAttach(thumbs.get(i), True)
+                if tf is not None and tf.exists():
+                    bmp = BF.decodeFile(tf.getAbsolutePath())
+                    if bmp is not None:
+                        return bmp
+        return None
+
+    def _avatar_icon(self, acc, u):
+        Color = jclass("android.graphics.Color")
+        src = None
+        if u.photo is not None and u.photo.photo_small is not None:
+            f = jclass("org.telegram.messenger.FileLoader").getInstance(acc).getPathToAttach(u.photo.photo_small, True)
+            if f is not None and f.exists():
+                src = jclass("android.graphics.BitmapFactory").decodeFile(f.getAbsolutePath())
+
+        def draw(c, bmp):
+            Rect = jclass("android.graphics.Rect")
+            if src is not None:
+                p = jclass("android.graphics.Paint")(jclass("android.graphics.Paint").FILTER_BITMAP_FLAG)
+                c.drawBitmap(src, None, Rect(0, 0, ICON, ICON), p)
+            else:
+                c.drawARGB(255, 0x17, 0x21, 0x2B)
+                ad = jclass("org.telegram.ui.Components.AvatarDrawable")(u)
+                o = ICON // 4
+                ad.setBounds(o, o, ICON - o, ICON - o)
+                ad.draw(c)
+        return self._canvas_icon(draw)
+
+    # ---------- pin ----------
+
+    def _pin(self, e):
+        def go():
+            try:
+                ctx = self._ctx()
+                info = self._build(ctx, get_selected_account(), e, 0)
+                SMC = jclass("androidx.core.content.pm.ShortcutManagerCompat")
+                if info is not None and SMC.isRequestPinShortcutSupported(ctx):
+                    SMC.requestPinShortcut(ctx, info, None)
+            except Exception as ex:
+                self._err("pin", ex)
+        run_on_queue(go)
