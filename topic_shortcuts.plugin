@@ -1,8 +1,8 @@
 __id__ = "topic_shortcuts"
 __name__ = "Topic Shortcuts"
-__description__ = "One launcher shortcut per forum topic, each opening that exact topic, with the topic's own name and icon. Long press the app icon, search for it in your launcher, or pin any topic to the home screen. Made by [firestarter1996](https://github.com/firestarter1996)."
+__description__ = "One launcher shortcut per forum topic, each opening that exact topic, with the topic's own name and icon. Long press the app icon, search for it in your launcher, add topics as chips to a Nova Now card, or pin any topic to the home screen. Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __min_version__ = "12.5.1"
 
 # XF (like Telegram and Nagram X) publishes one conversation shortcut per CHAT ("ndid_<dialog>"),
@@ -12,6 +12,9 @@ __min_version__ = "12.5.1"
 # plus your bot chats that have no chip yet. Work runs on the plugin queue, never the UI thread:
 # once a few seconds after load, when XF goes to the background, and after XF rebuilds its own
 # shortcuts. Nothing is published when nothing changed. No polling, no per message work.
+# Launchers that keep a shortcut (a Nova Now card action, a home screen pin) pin it, and a pinned
+# shortcut can fall outside the 15 dynamic ones; those are refreshed too, so a renamed topic or a
+# new topic emoji reaches every chip.
 
 from java import jclass, jlong, jint
 from base_plugin import BasePlugin, MethodHook
@@ -192,7 +195,8 @@ class TopicShortcutsPlugin(BasePlugin):
         room = max(1, SM.getMaxShortcutCountPerActivity() - len(others))
         want = (topics + bots)[:room]
         self.last_entries = topics + bots
-        sig = "|".join("%s:%s:%s:%s" % (e["id"], e["label"], e["emoji"], e["color"]) for e in want)
+        sig = "%d|" % room + "|".join("%s:%s:%s:%s" % (e["id"], e["label"], e["emoji"], e["color"])
+                                      for e in self.last_entries)
         ids = set(e["id"] for e in want)
         if sig == self.last_sig and ids.issubset(cur_ids):
             return
@@ -207,8 +211,26 @@ class TopicShortcutsPlugin(BasePlugin):
                 _log("rate limited, will retry on next pause")
                 return
             SMC.updateShortcuts(ctx, lst)
+        kept = self._refresh_pinned(ctx, acc, SM, ids)
         self.last_sig = sig
-        _log("published %d of %d (room %d)" % (lst.size(), len(topics) + len(bots), room))
+        _log("published %d of %d (room %d), refreshed %d pinned" % (lst.size(), len(topics) + len(bots), room, kept))
+
+    def _refresh_pinned(self, ctx, acc, SM, done):
+        """Topics a launcher pinned (Nova Now card chips, home screen) but that are not among the
+        dynamic ones published above: rebuild them so their name, icon and intent stay current."""
+        pinned = SM.getPinnedShortcuts()
+        by_id = dict((e["id"], e) for e in self.last_entries)
+        lst = jclass("java.util.ArrayList")()
+        for i in range(pinned.size()):
+            sid = str(pinned.get(i).getId())
+            if sid in done or sid not in by_id:
+                continue
+            info = self._build(ctx, acc, by_id[sid], 0)
+            if info is not None:
+                lst.add(info)
+        if lst.size() > 0:
+            jclass("androidx.core.content.pm.ShortcutManagerCompat").updateShortcuts(ctx, lst)
+        return lst.size()
 
     def _remove_mine(self, keep):
         ctx = self._ctx()
