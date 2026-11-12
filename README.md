@@ -26,7 +26,7 @@ To get a chip per topic or bot:
 
 Each chip opens its topic or bot chat. Nova pins every shortcut it keeps on a card, so the chips keep working even when one falls outside the 15 shortcuts Android lets the app publish at once, and the plugin keeps their names and icons current.
 
-The card editor stops at six actions, but the card itself shows more. With root, `tools/nova_card_chips.py` writes any number of chips into the card (instructions at the top of the file). I run eleven topics and sixteen bots on mine.
+The card editor stops at six actions, but the card itself shows more. With root, `tools/nova_card_chips.py` writes any number of chips into the card (instructions at the top of the file). I run fourteen on mine: eleven topics and three bots.
 
 ## Performance
 
@@ -48,7 +48,7 @@ Nagram XF 12.10.1 plugin build on a Pixel 6 Pro with my real forum group (12 top
 
 1.1.0 with Nova Launcher 8.9.7 on the Pixel 6 Pro: a Nagram XF card on the Nova Now page with six chips added through the card editor, then twelve written with the tool. Every chip showed its topic name and icon, and the Deb, Usage, GLaDOS and WSL2 chips each opened their topic. With the plugin forced to publish only six shortcuts, the six pinned ones outside that set were refreshed and still opened.
 
-1.2.0 on the Pixel 6 Pro: the plugin found 13 bot chats, and a card with 12 topics and 13 bots showed every chip with its avatar; the DocMaker, ZLibrary and BotFather chips each opened that bot chat, and all 25 shortcuts were pinned by Nova. On my Pixel 8 Pro the plugin found 16 bots after loading more of the chat list (4 before), and the card there got all 16 after my topics.
+1.2.0 on the Pixel 6 Pro: the plugin found 13 bot chats, and a card with 12 topics and 13 bots showed every chip with its avatar; the DocMaker, ZLibrary and BotFather chips each opened that bot chat, and all 25 shortcuts were pinned by Nova. On my Pixel 8 Pro the plugin found 16 bots after loading more of the chat list (4 before), and Nova pinned 13 of them from the card the first time I opened it.
 
 Not tested by me: a pinned home screen shortcut and Nova's search results. They use the same intent as the tested chips.
 
