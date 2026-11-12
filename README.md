@@ -30,7 +30,9 @@ The card editor stops at six actions, but the card itself shows more. With root,
 
 ## Performance
 
-All work runs on the plugin queue, never on the UI thread: once a few seconds after start, when the app goes to the background, and after Nagram XF rebuilds its own shortcuts. Nothing is sent to Android when nothing changed, and pinned shortcuts are rebuilt only when a name or icon changed. No polling, no timers, no per message work. The extra chat list pages are asked for at most three times per start, the same request the app makes when you scroll down. Icons come from emoji and avatar files the app already has on disk; a bot avatar that is not on disk yet is fetched once at low priority and used on the next pass.
+A chip never loses its icon. Nagram XF keeps a topic's emoji in memory only after it drew that topic, so right after the app starts in the background the emoji is often not there yet. The plugin keeps the last good icon of every chip on disk and uses it; a chip whose real icon is not available and has no saved copy is left exactly as it is, never repainted with a plain letter. Missing emoji are asked from the app once and the chips update when they arrive. Once per start the plugin also asks for the forum's topics from the server, so a renamed topic or a new topic icon reaches its chip.
+
+All work runs on the plugin queue, never on the UI thread: once a few seconds after start, when the app goes to the background, and after Nagram XF rebuilds its own shortcuts. Nothing is sent to Android when nothing changed, and pinned shortcuts are rebuilt only when a name or icon changed. No polling, no timers, no per message work. Pinned chips are rebuilt only when that chip's own name or icon changed. The extra chat list pages are asked for at most three times per start, the same request the app makes when you scroll down. Icons come from emoji and avatar files the app already has on disk; a bot avatar that is not on disk yet is fetched once at low priority and used on the next pass.
 
 ## Install
 
@@ -49,6 +51,8 @@ Nagram XF 12.10.1 plugin build on a Pixel 6 Pro with my real forum group (12 top
 1.1.0 with Nova Launcher 8.9.7 on the Pixel 6 Pro: a Nagram XF card on the Nova Now page with six chips added through the card editor, then twelve written with the tool. Every chip showed its topic name and icon, and the Deb, Usage, GLaDOS and WSL2 chips each opened their topic. With the plugin forced to publish only six shortcuts, the six pinned ones outside that set were refreshed and still opened.
 
 1.2.0 on the Pixel 6 Pro: the plugin found 13 bot chats, and a card with 12 topics and 13 bots showed every chip with its avatar; the DocMaker, ZLibrary and BotFather chips each opened that bot chat, and all 25 shortcuts were pinned by Nova. On my Pixel 8 Pro the plugin found 16 bots after loading more of the chat list (4 before), and Nova pinned 13 of them from the card the first time I opened it.
+
+1.3.0 on the Pixel 6 Pro: I reproduced the missing icons first (1.2.0 with the topic emoji unavailable, then a Nova restart, gave every topic chip a plain letter). With 1.3.0 under the same conditions every topic chip kept its emoji through a Nova restart. A topic renamed and a topic icon changed on the server both reached their chips without opening the app. On my Pixel 8 Pro all 14 chips on my card carry their real icons after the update.
 
 Not tested by me: a pinned home screen shortcut and Nova's search results. They use the same intent as the tested chips.
 

@@ -2,7 +2,7 @@ __id__ = "topic_shortcuts"
 __name__ = "Topic Shortcuts"
 __description__ = "One launcher shortcut per forum topic, each opening that exact topic, with the topic's own name and icon. Long press the app icon, search for it in your launcher, add topics as chips to a Nova Now card, or pin any topic to the home screen. Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 __min_version__ = "12.5.1"
 
 # XF (like Telegram and Nagram X) publishes one conversation shortcut per CHAT ("ndid_<dialog>"),
@@ -16,10 +16,11 @@ __min_version__ = "12.5.1"
 # shortcut can fall outside the 15 dynamic ones; those are refreshed too, so a renamed topic or a
 # new topic emoji reaches every chip.
 
-from java import jclass, jlong, jint
+from java import jclass, jlong, jint, dynamic_proxy
 from base_plugin import BasePlugin, MethodHook
 from hook_utils import find_class, get_private_field
 from client_utils import run_on_queue, get_selected_account
+from android_utils import run_on_ui_thread
 from ui.settings import Header, Switch, Input, Text, Divider
 
 PREFIX = "xft_"
@@ -63,6 +64,14 @@ class TopicShortcutsPlugin(BasePlugin):
         self.pending = False
         self.more_asked = 0
         self.ndialogs = 0
+        self.existing = set()
+        self.pin_sig = {}
+        self.icon_dir = None
+        self.asked_emoji = set()
+        self.emoji_cbs = []
+        self.reloaded = set()
+        self.waits = 0
+        self.incomplete = False
         plugin = self
 
         class PauseHook(MethodHook):
@@ -138,13 +147,15 @@ class TopicShortcutsPlugin(BasePlugin):
                     # from the local cache first; past its end, the same page request XF makes
                     # when you scroll down the chat list
                     self.more_asked += 1
-                    mc.loadDialogs(0, 0, 300 if cache else 100, cache)
-                    self._schedule(5000, True)
+                    n, c = (300 if cache else 100), cache
+                    run_on_ui_thread(lambda: mc.loadDialogs(0, 0, n, c))
+                    self._schedule(5000, False)
             except Exception as e:
                 self.more_asked = 3
                 self._err("more", e)
         last = [self._bare(s) for s in str(self.get_setting("last", "General, Updates, Usage")).split(",") if s.strip()]
         topics, bots = [], []
+        self.incomplete = False
         want_bots = self.get_setting("bots", True)
         for i in range(dialogs.size()):
             d = dialogs.get(i)
@@ -157,9 +168,17 @@ class TopicShortcutsPlugin(BasePlugin):
                     continue
                 if not (chat.creator or chat.admin_rights is not None):
                     continue
+                if -did not in self.reloaded:
+                    # once per start: the topics' current names and icons from the server (the request XF
+                    # makes when you open the topic list), so a renamed topic or a new icon reaches its chip
+                    self.reloaded.add(-did)
+                    cid = -did
+                    run_on_ui_thread(lambda: tc.reloadTopics(cid, False))
+                    self._schedule(6000, False)
                 lst = tc.getTopics(-did)
                 if lst is None or lst.size() == 0:
                     tc.loadTopics(-did)
+                    self.incomplete = True
                     continue
                 rows = []
                 for j in range(lst.size()):
@@ -180,7 +199,8 @@ class TopicShortcutsPlugin(BasePlugin):
                 for grp, _, t, title in rows:
                     topics.append({"id": "%s%d_%d" % (PREFIX, -did, int(t.id)), "chat": -did, "topic": int(t.id),
                                    "user": 0, "label": title, "long": "%s in %s" % (title, chat.title),
-                                   "emoji": int(t.icon_emoji_id or 0), "color": int(t.icon_color), "bot": False, "t": t})
+                                   "emoji": int(t.icon_emoji_id or 0), "color": int(t.icon_color), "bot": False, "t": t,
+                                   "ready": self._topic_ready(acc, int(t.icon_emoji_id or 0), "%s%d_%d_%d" % (PREFIX, -did, int(t.id), int(t.icon_emoji_id or 0)))})
             elif did > 0 and want_bots:
                 u = mc.getUser(did)
                 if u is None or not u.bot:
@@ -188,8 +208,8 @@ class TopicShortcutsPlugin(BasePlugin):
                 name = str(u.first_name or u.username or "Bot").strip()
                 ph = u.photo.photo_id if u.photo is not None else 0
                 bots.append({"id": "%su%d" % (PREFIX, did), "chat": 0, "topic": 0, "user": did, "label": name,
-                             "long": name, "emoji": ph, "color": 1 if self._avatar_file(acc, u) else 0,
-                             "bot": True, "u": u, "k": (0 if d.pinned else 1, -int(d.last_message_date or 0))})
+                             "long": name, "emoji": ph, "color": 1 if (self._avatar_file(acc, u) or u.photo is None) else 0,
+                             "bot": True, "u": u, "ready": True, "k": (0 if d.pinned else 1, -int(d.last_message_date or 0))})
         # chat list order: pinned chats first, then newest message first (the in memory list can be
         # unsorted for a moment while XF loads more chats)
         bots.sort(key=lambda b: b["k"])
@@ -205,6 +225,16 @@ class TopicShortcutsPlugin(BasePlugin):
             return
         acc = get_selected_account()
         topics, bots = self._entries(acc)
+        if self.incomplete and self.waits < 6:
+            # a forum's topics are still loading: change nothing now, look again shortly (at most 6 times)
+            self.waits += 1
+            self._schedule(5000, False)
+            return
+        self.waits = 0
+        if self.ndialogs == 0:
+            # XF woke in the background and has not loaded the chat list yet: change nothing now,
+            # XF rebuilding its own shortcuts once chats load runs this again
+            return
         SM = ctx.getSystemService(jclass("android.content.pm.ShortcutManager"))
         SMC = jclass("androidx.core.content.pm.ShortcutManagerCompat")
         cur = SMC.getDynamicShortcuts(ctx)
@@ -226,9 +256,10 @@ class TopicShortcutsPlugin(BasePlugin):
         want = [e for e in entries if e["id"] in ids]
         self.last_entries = entries
         sig = "%d|%s|" % (room, ",".join(sorted(pinned & set(e["id"] for e in entries)))) + "|".join(
-            "%s:%s:%s:%s" % (e["id"], e["label"], e["emoji"], e["color"]) for e in entries)
+            "%s:%s:%s:%s:%s" % (e["id"], e["label"], e["emoji"], e["color"], e["ready"]) for e in entries)
         if sig == self.last_sig and ids.issubset(cur_ids):
             return
+        self.existing = cur_ids | pinned
         self._remove_mine(ids)
         lst = jclass("java.util.ArrayList")()
         for e in want:
@@ -255,9 +286,14 @@ class TopicShortcutsPlugin(BasePlugin):
             sid = str(pinned.get(i).getId())
             if sid in done or sid not in by_id:
                 continue
-            info = self._build(ctx, acc, by_id[sid], 0)
+            e = by_id[sid]
+            one = "%s:%s:%s:%s" % (e["label"], e["emoji"], e["color"], e["ready"])
+            if self.pin_sig.get(sid) == one:
+                continue
+            info = self._build(ctx, acc, e, 0)
             if info is not None:
                 lst.add(info)
+                self.pin_sig[sid] = one
         if lst.size() > 0:
             jclass("androidx.core.content.pm.ShortcutManagerCompat").updateShortcuts(ctx, lst)
         return lst.size()
@@ -297,7 +333,11 @@ class TopicShortcutsPlugin(BasePlugin):
             b.setLongLived(True)
             b.setRank(rank)
             b.setLocusId(jclass("androidx.core.content.LocusIdCompat")(e["id"]))
-            icon = self._icon(acc, e)
+            icon, good = self._icon(acc, e)
+            if icon is None or (not good and e["id"] in self.existing):
+                # never replace a chip's icon with a fallback: keep what it has, the next pass
+                # (app to background, or XF rebuilding its shortcuts) retries once the image is there
+                return None
             P = jclass("androidx.core.app.Person$Builder")()
             P.setName(e["label"]).setKey(e["id"])
             if e["bot"]:
@@ -319,12 +359,65 @@ class TopicShortcutsPlugin(BasePlugin):
         bmp = Bitmap.createBitmap(ICON, ICON, Config.ARGB_8888)
         c = jclass("android.graphics.Canvas")(bmp)
         draw(c, bmp)
+        return bmp
+
+    @staticmethod
+    def _adaptive(bmp):
         return jclass("androidx.core.graphics.drawable.IconCompat").createWithAdaptiveBitmap(bmp)
+
+    def _cache_file(self, sid):
+        if self.icon_dir is None:
+            d = jclass("java.io.File")(self._ctx().getFilesDir(), "topic_shortcuts_icons")
+            d.mkdirs()
+            self.icon_dir = d
+        return jclass("java.io.File")(self.icon_dir, sid + ".png")
+
+    def _save(self, sid, bmp):
+        try:
+            out = jclass("java.io.FileOutputStream")(self._cache_file(sid))
+            try:
+                bmp.compress(jclass("android.graphics.Bitmap$CompressFormat").PNG, 100, out)
+            finally:
+                out.close()
+        except Exception as ex:
+            self._err("save icon", ex)
+
+    def _cached(self, sid):
+        f = self._cache_file(sid)
+        if f.exists():
+            return jclass("android.graphics.BitmapFactory").decodeFile(f.getAbsolutePath())
+        return None
+
+    def _topic_ready(self, acc, doc_id, sid):
+        if not doc_id:
+            return True
+        try:
+            if jclass("org.telegram.ui.Components.AnimatedEmojiDrawable").findDocument(acc, doc_id) is not None:
+                return True
+            self._fetch_emoji(acc, doc_id)
+            return self._cache_file(sid).exists()
+        except Exception:
+            return False
 
     def _icon(self, acc, e):
         try:
             if e["bot"]:
-                return self._avatar_icon(acc, e["u"])
+                bmp, good = self._avatar_icon(acc, e["u"])
+            else:
+                bmp, good = self._topic_icon(acc, e)
+            if good:
+                self._save("%s_%s" % (e["id"], e["emoji"]), bmp)
+            else:
+                old = self._cached("%s_%s" % (e["id"], e["emoji"]))
+                if old is not None:
+                    return self._adaptive(old), True
+            return self._adaptive(bmp), good
+        except Exception as ex:
+            self._err("icon " + e["label"], ex)
+            return None, False
+
+    def _topic_icon(self, acc, e):
+        if True:
             src = self._emoji_bitmap(acc, e["emoji"]) if e["emoji"] else None
             Color = jclass("android.graphics.Color")
             inner = int(ICON * 0.5)
@@ -340,10 +433,39 @@ class TopicShortcutsPlugin(BasePlugin):
                     dr = jclass("org.telegram.ui.Components.Forum.ForumUtilities").createTopicDrawable(e["t"], False)
                     dr.setBounds(off, off, off + inner, off + inner)
                     dr.draw(c)
-            return self._canvas_icon(draw)
-        except Exception as ex:
-            self._err("icon " + e["label"], ex)
-            return None
+            return self._canvas_icon(draw), (src is not None or not e["emoji"])
+
+    def _fetch_emoji(self, acc, doc_id):
+        """XF keeps a topic's emoji in memory only after it drew that topic. Ask XF once for the
+        emoji, download its file, then run again; no polling."""
+        if doc_id in self.asked_emoji:
+            return
+        self.asked_emoji.add(doc_id)
+        plugin = self
+
+        def got(doc):
+            try:
+                if doc is not None:
+                    jclass("org.telegram.messenger.FileLoader").getInstance(acc).loadFile(doc, "topic_shortcuts", 1, 1)
+                # one pass soon, one after the file had time to arrive
+                plugin._schedule(4000, False)
+                run_on_queue(lambda: plugin._schedule(0, False), delay=15000)
+            except Exception as e:
+                plugin._err("emoji file", e)
+
+        try:
+            AED = jclass("org.telegram.ui.Components.AnimatedEmojiDrawable")
+            RD = jclass("org.telegram.ui.Components.AnimatedEmojiDrawable$ReceivedDocument")
+
+            class Got(dynamic_proxy(RD)):
+                def run(self, doc):
+                    got(doc)
+
+            cb = Got()
+            self.emoji_cbs.append(cb)  # keep the callback alive until XF answers
+            run_on_ui_thread(lambda: AED.getDocumentFetcher(acc).fetchDocument(jlong(doc_id), cb))
+        except Exception as e:
+            self._err("emoji fetch", e)
 
     def _emoji_bitmap(self, acc, doc_id):
         """The topic's custom emoji as a still bitmap, from files XF already downloaded. None if not on disk."""
@@ -416,7 +538,7 @@ class TopicShortcutsPlugin(BasePlugin):
                 o = ICON // 4
                 ad.setBounds(o, o, ICON - o, ICON - o)
                 ad.draw(c)
-        return self._canvas_icon(draw)
+        return self._canvas_icon(draw), (src is not None or u.photo is None)
 
     # ---------- pin ----------
 
