@@ -2,7 +2,7 @@ __id__ = "topic_shortcuts"
 __name__ = "Topic Shortcuts"
 __description__ = "One launcher shortcut per forum topic, each opening that exact topic, with the topic's own name and icon. Long press the app icon, search for it in your launcher, add topics as chips to a Nova Now card, or pin any topic to the home screen. Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __min_version__ = "12.5.1"
 
 # XF (like Telegram and Nagram X) publishes one conversation shortcut per CHAT ("ndid_<dialog>"),
@@ -61,6 +61,8 @@ class TopicShortcutsPlugin(BasePlugin):
         self.last_entries = []
         self.last_run = 0
         self.pending = False
+        self.more_asked = 0
+        self.ndialogs = 0
         plugin = self
 
         class PauseHook(MethodHook):
@@ -126,13 +128,30 @@ class TopicShortcutsPlugin(BasePlugin):
         mc = MC.getInstance(acc)
         tc = mc.getTopicsController()
         dialogs = mc.getAllDialogs()
+        self.ndialogs = dialogs.size()
+        if self.get_setting("bots", True) and self.more_asked < 3:
+            # XF only keeps the chats you have scrolled to in memory; bot chats further down the list
+            # would be missed, so load up to three more pages, then run again.
+            try:
+                cache = not mc.isDialogsEndReached(0)
+                if cache or not mc.isServerDialogsEndReached(0):
+                    # from the local cache first; past its end, the same page request XF makes
+                    # when you scroll down the chat list
+                    self.more_asked += 1
+                    mc.loadDialogs(0, 0, 300 if cache else 100, cache)
+                    self._schedule(5000, True)
+            except Exception as e:
+                self.more_asked = 3
+                self._err("more", e)
         last = [self._bare(s) for s in str(self.get_setting("last", "General, Updates, Usage")).split(",") if s.strip()]
         topics, bots = [], []
-        n = min(dialogs.size(), 60)
-        for i in range(n):
+        want_bots = self.get_setting("bots", True)
+        for i in range(dialogs.size()):
             d = dialogs.get(i)
             did = d.id
             if did < 0:
+                if i >= 60:
+                    continue
                 chat = mc.getChat(-did)
                 if chat is None or not chat.forum or getattr(chat, "monoforum", False):
                     continue
@@ -162,14 +181,18 @@ class TopicShortcutsPlugin(BasePlugin):
                     topics.append({"id": "%s%d_%d" % (PREFIX, -did, int(t.id)), "chat": -did, "topic": int(t.id),
                                    "user": 0, "label": title, "long": "%s in %s" % (title, chat.title),
                                    "emoji": int(t.icon_emoji_id or 0), "color": int(t.icon_color), "bot": False, "t": t})
-            elif did > 0 and self.get_setting("bots", True):
+            elif did > 0 and want_bots:
                 u = mc.getUser(did)
                 if u is None or not u.bot:
                     continue
                 name = str(u.first_name or u.username or "Bot").strip()
                 ph = u.photo.photo_id if u.photo is not None else 0
                 bots.append({"id": "%su%d" % (PREFIX, did), "chat": 0, "topic": 0, "user": did, "label": name,
-                             "long": name, "emoji": ph, "color": 0, "bot": True, "u": u})
+                             "long": name, "emoji": ph, "color": 1 if self._avatar_file(acc, u) else 0,
+                             "bot": True, "u": u, "k": (0 if d.pinned else 1, -int(d.last_message_date or 0))})
+        # chat list order: pinned chats first, then newest message first (the in memory list can be
+        # unsorted for a moment while XF loads more chats)
+        bots.sort(key=lambda b: b["k"])
         return topics, bots
 
     # ---------- publish ----------
@@ -190,20 +213,26 @@ class TopicShortcutsPlugin(BasePlugin):
         for i in range(cur.size()):
             sid = str(cur.get(i).getId())
             (cur_ids if sid.startswith(PREFIX) else others).add(sid)
-        # skip bots XF already shows (its own notification shortcut for that chat)
-        bots = [b for b in bots if ("ndid_%d" % b["user"]) not in others][:4]
+        # Android allows 15 dynamic shortcuts. A shortcut a launcher pinned (a Nova Now card chip, a
+        # home screen icon) lives on without a dynamic slot, so slots go to the not yet pinned entries
+        # first (topics before bots, in chat list order), which lets a launcher pin every one of them,
+        # then to pinned ones for the long press menu. Ranks keep the list order.
+        entries = topics + bots
+        pins = SM.getPinnedShortcuts()
+        pinned = set(str(pins.get(i).getId()) for i in range(pins.size()))
         room = max(1, SM.getMaxShortcutCountPerActivity() - len(others))
-        want = (topics + bots)[:room]
-        self.last_entries = topics + bots
-        sig = "%d|" % room + "|".join("%s:%s:%s:%s" % (e["id"], e["label"], e["emoji"], e["color"])
-                                      for e in self.last_entries)
-        ids = set(e["id"] for e in want)
+        chosen = [e for e in entries if e["id"] not in pinned] + [e for e in entries if e["id"] in pinned]
+        ids = set(e["id"] for e in chosen[:room])
+        want = [e for e in entries if e["id"] in ids]
+        self.last_entries = entries
+        sig = "%d|%s|" % (room, ",".join(sorted(pinned & set(e["id"] for e in entries)))) + "|".join(
+            "%s:%s:%s:%s" % (e["id"], e["label"], e["emoji"], e["color"]) for e in entries)
         if sig == self.last_sig and ids.issubset(cur_ids):
             return
         self._remove_mine(ids)
         lst = jclass("java.util.ArrayList")()
-        for rank, e in enumerate(want):
-            info = self._build(ctx, acc, e, rank)
+        for e in want:
+            info = self._build(ctx, acc, e, entries.index(e))
             if info is not None:
                 lst.add(info)
         if lst.size() > 0:
@@ -213,7 +242,8 @@ class TopicShortcutsPlugin(BasePlugin):
             SMC.updateShortcuts(ctx, lst)
         kept = self._refresh_pinned(ctx, acc, SM, ids)
         self.last_sig = sig
-        _log("published %d of %d (room %d), refreshed %d pinned" % (lst.size(), len(topics) + len(bots), room, kept))
+        _log("published %d of %d (room %d), refreshed %d pinned, %d chats loaded, %d bots: %s" % (
+            lst.size(), len(entries), room, kept, self.ndialogs, len(bots), ", ".join(b["id"] + "=" + b["label"] for b in bots)))
 
     def _refresh_pinned(self, ctx, acc, SM, done):
         """Topics a launcher pinned (Nova Now card chips, home screen) but that are not among the
@@ -351,13 +381,29 @@ class TopicShortcutsPlugin(BasePlugin):
                         return bmp
         return None
 
+    def _avatar_file(self, acc, u):
+        """The bot's small avatar file if XF has it on disk; if not, asks XF to fetch it (low priority)
+        so the next publish, when the app goes to the background, gets the real picture."""
+        if u.photo is None or u.photo.photo_small is None:
+            return None
+        FL = jclass("org.telegram.messenger.FileLoader").getInstance(acc)
+        f = FL.getPathToAttach(u.photo.photo_small, True)
+        if f is not None and f.exists():
+            return f
+        try:
+            IL = jclass("org.telegram.messenger.ImageLocation")
+            loc = IL.getForUser(u, IL.TYPE_SMALL)
+            if loc is not None:
+                FL.loadFile(loc, u, None, 0, 1)
+        except Exception as e:
+            self._err("avatar load", e)
+        return None
+
     def _avatar_icon(self, acc, u):
-        Color = jclass("android.graphics.Color")
         src = None
-        if u.photo is not None and u.photo.photo_small is not None:
-            f = jclass("org.telegram.messenger.FileLoader").getInstance(acc).getPathToAttach(u.photo.photo_small, True)
-            if f is not None and f.exists():
-                src = jclass("android.graphics.BitmapFactory").decodeFile(f.getAbsolutePath())
+        f = self._avatar_file(acc, u)
+        if f is not None:
+            src = jclass("android.graphics.BitmapFactory").decodeFile(f.getAbsolutePath())
 
         def draw(c, bmp):
             Rect = jclass("android.graphics.Rect")
