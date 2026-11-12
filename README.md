@@ -1,4 +1,4 @@
-# 🧵📌🧩 Topic Shortcuts
+# 🧵📌🤖 Topic Shortcuts
 
 A plugin for Nagram XF. Every topic of your forum groups gets its own launcher shortcut, with the topic's own name and icon, and tapping it opens that exact topic. Every bot you chat with gets one too, with its name and avatar. Long press the app icon, search for them in your launcher, put them as chips on a Nova Now card, or pin them to your home screen.
 
