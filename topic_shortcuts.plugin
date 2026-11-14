@@ -2,7 +2,7 @@ __id__ = "topic_shortcuts"
 __name__ = "Topic Shortcuts"
 __description__ = "One launcher shortcut per forum topic, each opening that exact topic, with the topic's own name and icon. Long press the app icon, search for it in your launcher, add topics as chips to a Nova Now card, or pin any topic to the home screen. Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 __min_version__ = "12.5.1"
 
 # XF (like Telegram and Nagram X) publishes one conversation shortcut per CHAT ("ndid_<dialog>"),
@@ -16,7 +16,7 @@ __min_version__ = "12.5.1"
 # shortcut can fall outside the 15 dynamic ones; those are refreshed too, so a renamed topic or a
 # new topic emoji reaches every chip.
 
-from java import jclass, jlong, jint, dynamic_proxy
+from java import jclass, jlong, jint
 from base_plugin import BasePlugin, MethodHook
 from hook_utils import find_class, get_private_field
 from client_utils import run_on_queue, get_selected_account
@@ -68,7 +68,7 @@ class TopicShortcutsPlugin(BasePlugin):
         self.pin_sig = {}
         self.icon_dir = None
         self.asked_emoji = set()
-        self.emoji_cbs = []
+        self.asked_file = set()
         self.reloaded = set()
         self.waits = 0
         self.incomplete = False
@@ -442,28 +442,29 @@ class TopicShortcutsPlugin(BasePlugin):
             return
         self.asked_emoji.add(doc_id)
         plugin = self
+        # 1.3.1: no callback object is handed to XF any more. 1.3.0 passed a small Python callback to XF's emoji
+        # fetcher; when XF answered, the call into Python could fail outside any try block and the whole app died a
+        # few seconds after it started ('Got' object has no attribute '_chaquopyGetDict', 3 times on 11-14-2026).
+        # XF accepts an empty callback and still puts the emoji in its memory; this plugin just looks again a little
+        # later (two timed passes, no polling), and _emoji_bitmap asks for the file when it is not on disk yet.
 
-        def got(doc):
+        def ask():
             try:
-                if doc is not None:
-                    jclass("org.telegram.messenger.FileLoader").getInstance(acc).loadFile(doc, "topic_shortcuts", 1, 1)
-                # one pass soon, one after the file had time to arrive
-                plugin._schedule(4000, False)
-                run_on_queue(lambda: plugin._schedule(0, False), delay=15000)
+                AED = jclass("org.telegram.ui.Components.AnimatedEmojiDrawable")
+                AED.getDocumentFetcher(acc).fetchDocument(jlong(doc_id), None)
             except Exception as e:
-                plugin._err("emoji file", e)
+                plugin._err("emoji fetch", e)
+
+        def again():
+            try:
+                plugin._schedule(0, False)
+            except Exception as e:
+                plugin._err("emoji again", e)
 
         try:
-            AED = jclass("org.telegram.ui.Components.AnimatedEmojiDrawable")
-            RD = jclass("org.telegram.ui.Components.AnimatedEmojiDrawable$ReceivedDocument")
-
-            class Got(dynamic_proxy(RD)):
-                def run(self, doc):
-                    got(doc)
-
-            cb = Got()
-            self.emoji_cbs.append(cb)  # keep the callback alive until XF answers
-            run_on_ui_thread(lambda: AED.getDocumentFetcher(acc).fetchDocument(jlong(doc_id), cb))
+            run_on_ui_thread(ask)
+            run_on_queue(again, delay=4000)
+            run_on_queue(again, delay=15000)
         except Exception as e:
             self._err("emoji fetch", e)
 
@@ -476,6 +477,12 @@ class TopicShortcutsPlugin(BasePlugin):
         BF = jclass("android.graphics.BitmapFactory")
         f = FL.getPathToAttach(doc, True)
         mime = str(doc.mime_type or "")
+        if (f is None or not f.exists()) and doc_id not in self.asked_file:
+            self.asked_file.add(doc_id)          # ask XF for the file once; a later pass reads it
+            try:
+                FL.loadFile(doc, "topic_shortcuts", 1, 1)
+            except Exception as e:
+                self._err("emoji file", e)
         if f is not None and f.exists():
             if "tgsticker" in mime:
                 RL = jclass("org.telegram.ui.Components.RLottieDrawable")
