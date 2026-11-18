@@ -34,6 +34,16 @@ A chip never loses its icon. Nagram XF keeps a topic's emoji in memory only afte
 
 All work runs on the plugin queue, never on the UI thread: once a few seconds after start, when the app goes to the background, and after Nagram XF rebuilds its own shortcuts. Nothing is sent to Android when nothing changed, and pinned shortcuts are rebuilt only when a name or icon changed. No polling, no timers, no per message work. Pinned chips are rebuilt only when that chip's own name or icon changed. The extra chat list pages are asked for at most three times per start, the same request the app makes when you scroll down. Icons come from emoji and avatar files the app already has on disk; a bot avatar that is not on disk yet is fetched once at low priority and used on the next pass.
 
+## What's new in 1.3.2 (11-17-2026)
+
+One picture per chip. A topic or bot whose name starts with an emoji ("🐧 Deb", "🦅SoulSeek") used to show that emoji twice on a chip: once as the picture and again in the name.
+
+* The leading emoji is left out of the shortcut name, so the chip reads "Deb" next to its 🐧 picture, and a bot keeps its avatar with its plain name.
+* A topic with no icon of its own still uses the first emoji of its name as its picture.
+* A name that is only emoji is kept as it is.
+
+Nova keeps its own copy of every chip's picture and name and does not always pick up a change right away. When a chip still shows an old picture after a topic was renamed or its icon changed, restarting Nova brings it up to date.
+
 ## What's new in 1.3.1 (11-14-2026)
 
 Crash fix. 1.3.0 handed XF a small callback of its own when it asked for a topic's emoji. Right after the app started, XF could call it at a moment when the callback could not be rebuilt, and the whole app closed.
