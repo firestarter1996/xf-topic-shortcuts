@@ -2,7 +2,7 @@ __id__ = "topic_shortcuts"
 __name__ = "Topic Shortcuts"
 __description__ = "One launcher shortcut per forum topic, each opening that exact topic, with the topic's own name and icon. Long press the app icon, search for it in your launcher, add topics as chips to a Nova Now card, or pin any topic to the home screen. Made by [firestarter1996](https://github.com/firestarter1996)."
 __author__ = "firestarter1996"
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 __min_version__ = "12.5.1"
 
 # XF (like Telegram and Nagram X) publishes one conversation shortcut per CHAT ("ndid_<dialog>"),
@@ -132,6 +132,24 @@ class TopicShortcutsPlugin(BasePlugin):
         """Topic name without emoji or spaces, lower case: "🐧 Deb" and "deb" match."""
         return "".join(ch for ch in str(title).lower() if ch.isalnum())
 
+    @staticmethod
+    def _plain(name):
+        """A name without its leading emoji: "🐧 Deb" -> "Deb", "🦅SoulSeek" -> "SoulSeek". The chip's picture
+        already shows that emoji (a topic without an icon draws the first emoji of its name) or the avatar,
+        so the label carries the plain name only. A name that is only emoji is kept as it is."""
+        try:
+            s = str(name or "").strip()
+            i = 0
+            while i < len(s):
+                ch = s[i]
+                if ch.isalnum() or ch.isspace() or ord(ch) < 0x80:
+                    break
+                i += 1
+            rest = s[i:].strip()
+            return rest if (i > 0 and rest) else s
+        except Exception:
+            return str(name or "")
+
     def _entries(self, acc):
         MC = jclass("org.telegram.messenger.MessagesController")
         mc = MC.getInstance(acc)
@@ -198,14 +216,14 @@ class TopicShortcutsPlugin(BasePlugin):
                 rows.sort(key=lambda r: (r[0], r[1]))
                 for grp, _, t, title in rows:
                     topics.append({"id": "%s%d_%d" % (PREFIX, -did, int(t.id)), "chat": -did, "topic": int(t.id),
-                                   "user": 0, "label": title, "long": "%s in %s" % (title, chat.title),
+                                   "user": 0, "label": self._plain(title), "long": "%s in %s" % (self._plain(title), self._plain(chat.title)),
                                    "emoji": int(t.icon_emoji_id or 0), "color": int(t.icon_color), "bot": False, "t": t,
                                    "ready": self._topic_ready(acc, int(t.icon_emoji_id or 0), "%s%d_%d_%d" % (PREFIX, -did, int(t.id), int(t.icon_emoji_id or 0)))})
             elif did > 0 and want_bots:
                 u = mc.getUser(did)
                 if u is None or not u.bot:
                     continue
-                name = str(u.first_name or u.username or "Bot").strip()
+                name = self._plain(str(u.first_name or u.username or "Bot").strip())
                 ph = u.photo.photo_id if u.photo is not None else 0
                 bots.append({"id": "%su%d" % (PREFIX, did), "chat": 0, "topic": 0, "user": did, "label": name,
                              "long": name, "emoji": ph, "color": 1 if (self._avatar_file(acc, u) or u.photo is None) else 0,
